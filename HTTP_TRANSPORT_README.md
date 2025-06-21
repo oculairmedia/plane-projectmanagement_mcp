@@ -26,6 +26,12 @@ node src/index.js --http
 
 ### Endpoints
 
+#### MCP Protocol Endpoints
+- **POST /mcp** - MCP initialization and tool execution (for Letta registration)
+- **GET /mcp** - MCP SSE streaming (with mcp-session-id header)
+- **DELETE /mcp** - MCP session termination
+
+#### REST API Endpoints
 - **GET /health** - Health check and server status
 - **GET /tools** - List all available Plane tools
 - **POST /tools/{toolName}** - Execute a tool (JSON response)
@@ -35,14 +41,20 @@ node src/index.js --http
 
 ### Example Usage
 
+#### Letta Registration
+Register with Letta using the MCP endpoint:
+```
+http://192.168.50.90:3094/mcp
+```
+
 #### Health Check
 ```bash
-curl http://localhost:3094/health
+curl http://192.168.50.90:3094/health
 ```
 
 #### List Tools
 ```bash
-curl http://localhost:3094/tools
+curl http://192.168.50.90:3094/tools
 ```
 
 #### Execute Tool

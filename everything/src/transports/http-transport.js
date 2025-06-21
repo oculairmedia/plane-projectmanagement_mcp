@@ -1,5 +1,8 @@
 import express from 'express';
 import cors from 'cors';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/transport/streamableHttp.js';
+import { InMemoryEventStore } from '@modelcontextprotocol/sdk/server/transport/event-store.js';
+import { randomUUID } from 'crypto';
 
 /**
  * Run the server using HTTP streaming transport (MCP compatible)
@@ -9,6 +12,7 @@ import cors from 'cors';
 export async function runHTTP(server) {
     try {
         const app = express();
+        const transports = new Map(); // Store active MCP transports by session ID
         
         // Middleware
         app.use(cors());
@@ -20,6 +24,64 @@ export async function runHTTP(server) {
             const timestamp = new Date().toISOString();
             console.log(`[${timestamp}] ${req.method} ${req.path} - ${req.ip}`);
             next();
+        });
+
+        // Helper function to check if a request is an initialization request
+        const isInitializeRequest = (body) => {
+            return body && body.method === 'initialize' && body.jsonrpc === '2.0';
+        };
+
+        // MCP Protocol endpoint - this is what Letta will use for registration
+        app.all('/mcp', async (req, res) => {
+            try {
+                const sessionId = req.headers['mcp-session-id'];
+                let transport;
+                
+                if (sessionId && transports.has(sessionId)) {
+                    // Reuse existing transport for this session
+                    transport = transports.get(sessionId);
+                } else if (!sessionId && req.method === 'POST' && isInitializeRequest(req.body)) {
+                    // New initialization request - create new transport
+                    const eventStore = new InMemoryEventStore();
+                    transport = new StreamableHTTPServerTransport({
+                        sessionIdGenerator: () => randomUUID(),
+                        eventStore,
+                        onsessioninitialized: (sessionId) => {
+                            console.log(`MCP session initialized with ID: ${sessionId}`);
+                            transports.set(sessionId, transport);
+                        }
+                    });
+                    
+                    // Connect the transport to the MCP server
+                    await server.server.connect(transport);
+                } else {
+                    // Invalid request
+                    res.status(400).json({
+                        jsonrpc: '2.0',
+                        error: {
+                            code: -32000,
+                            message: 'Bad Request: No valid session ID provided or invalid initialization',
+                        },
+                        id: req.body?.id || null,
+                    });
+                    return;
+                }
+                
+                // Handle the MCP request through the transport
+                await transport.handleRequest(req, res, req.body);
+            } catch (error) {
+                console.error('Error handling MCP request:', error);
+                if (!res.headersSent) {
+                    res.status(500).json({
+                        jsonrpc: '2.0',
+                        error: {
+                            code: -32603,
+                            message: 'Internal server error',
+                        },
+                        id: req.body?.id || null,
+                    });
+                }
+            }
         });
         
         // Health check endpoint
