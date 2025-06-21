@@ -15,9 +15,6 @@ async function main() {
         // Create server instance
         const server = new PlaneServer();
         
-        // Register all tool handlers
-        registerToolHandlers(server.server);
-        
         // Determine transport mode from command line arguments
         const useSSE = process.argv.includes('--sse');
         const useHTTP = process.argv.includes('--http');
@@ -25,13 +22,19 @@ async function main() {
         // Run server with appropriate transport
         if (useHTTP) {
             console.log('Starting Plane server with HTTP streaming transport');
+            // For HTTP transport, we don't register MCP handlers
             await runHTTP(server);
-        } else if (useSSE) {
-            console.log('Starting Plane server with SSE transport');
-            await runSSE(server);
         } else {
-            console.log('Starting Plane server with stdio transport');
-            await runStdio(server);
+            // Register all tool handlers for MCP transports
+            registerToolHandlers(server.server);
+            
+            if (useSSE) {
+                console.log('Starting Plane server with SSE transport');
+                await runSSE(server);
+            } else {
+                console.log('Starting Plane server with stdio transport');
+                await runStdio(server);
+            }
         }
     } catch (error) {
         console.error('Failed to start Plane server:', error);
