@@ -3,7 +3,7 @@ import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 
 /**
  * Run the server using SSE transport
- * @param {Object} server - The GhostServer instance
+ * @param {Object} server - The PlaneServer instance
  */
 export async function runSSE(server) {
     try {
@@ -223,8 +223,8 @@ export async function runSSE(server) {
         
         const PORT = process.env.PORT || 3064;
         const httpServer = app.listen(PORT, () => {
-            console.log(`Ghost SSE server is running on port ${PORT}`);
-            console.log(`Ghost API: ${server.baseUrl}`);
+            console.log(`Plane SSE server is running on port ${PORT}`);
+            console.log(`Plane API: ${server.baseUrl}`);
             console.log(`API credentials: ${server.keyId && server.keySecret ? 'Available' : 'Not available'}`);
             console.log(`Reconnection enabled: max attempts=${maxReconnectAttempts}, initial delay=${reconnectDelay}ms`);
             console.log(`Connection tracking: enabled with ping interval (30s)`);

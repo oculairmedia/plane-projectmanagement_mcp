@@ -32,16 +32,16 @@ const planeToolHandlers = {
 
 /**
  * Register all tool handlers with the server
- * @param {Object} server - The GhostServer instance
+ * @param {Object} server - The MCP server instance
  */
 export function registerToolHandlers(server) {
     // Register tool definitions
-    server.server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: planeToolDefinitions,
     }));
 
     // Register tool call handler
-    server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const handler = planeToolHandlers[request.params.name];
 
         if (handler) {

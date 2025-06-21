@@ -2,13 +2,13 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 
 /**
  * Run the server using stdio transport
- * @param {Object} server - The GhostServer instance
+ * @param {Object} server - The PlaneServer instance
  */
 export async function runStdio(server) {
     try {
         const transport = new StdioServerTransport();
         await server.server.connect(transport);
-        console.error('Ghost MCP server running on stdio');
+        console.error('Plane MCP server running on stdio');
 
         const cleanup = async () => {
             await server.server.close();

@@ -1,7 +1,5 @@
 import express from 'express';
 import cors from 'cors';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/transport/streamableHttp.js';
-import { InMemoryEventStore } from '@modelcontextprotocol/sdk/server/transport/event-store.js';
 import { randomUUID } from 'crypto';
 
 /**
@@ -12,10 +10,13 @@ import { randomUUID } from 'crypto';
 export async function runHTTP(server) {
     try {
         const app = express();
-        const transports = new Map(); // Store active MCP transports by session ID
+        const sessions = new Map(); // Store active sessions
         
         // Middleware
-        app.use(cors());
+        app.use(cors({
+            origin: ['http://localhost', 'http://127.0.0.1', 'http://192.168.50.90', 'https://letta.oculair.ca'],
+            credentials: true
+        }));
         app.use(express.json({ limit: '10mb' }));
         app.use(express.urlencoded({ extended: true }));
         
@@ -26,86 +27,177 @@ export async function runHTTP(server) {
             next();
         });
 
-        // Helper function to check if a request is an initialization request
-        const isInitializeRequest = (body) => {
-            return body && body.method === 'initialize' && body.jsonrpc === '2.0';
+        // Get or create session
+        const getOrCreateSession = (req) => {
+            const sessionId = req.headers['mcp-session-id'];
+            
+            if (sessionId && sessions.has(sessionId)) {
+                return sessions.get(sessionId);
+            }
+            
+            // Create new session if no ID provided
+            if (!sessionId) {
+                const newSessionId = randomUUID();
+                const session = {
+                    id: newSessionId,
+                    createdAt: new Date(),
+                    lastActivity: new Date()
+                };
+                sessions.set(newSessionId, session);
+                return session;
+            }
+            
+            return null;
         };
 
-        // MCP Protocol endpoint - this is what Letta will use for registration
-        app.all('/mcp', async (req, res) => {
+        // Main MCP endpoint - POST
+        app.post('/mcp', async (req, res) => {
             try {
-                const sessionId = req.headers['mcp-session-id'];
-                let transport;
-                
-                if (sessionId && transports.has(sessionId)) {
-                    // Reuse existing transport for this session
-                    transport = transports.get(sessionId);
-                } else if (!sessionId && req.method === 'POST' && isInitializeRequest(req.body)) {
-                    // New initialization request - create new transport
-                    const eventStore = new InMemoryEventStore();
-                    transport = new StreamableHTTPServerTransport({
-                        sessionIdGenerator: () => randomUUID(),
-                        eventStore,
-                        onsessioninitialized: (sessionId) => {
-                            console.log(`MCP session initialized with ID: ${sessionId}`);
-                            transports.set(sessionId, transport);
-                        }
-                    });
-                    
-                    // Connect the transport to the MCP server
-                    await server.server.connect(transport);
-                } else {
-                    // Invalid request
-                    res.status(400).json({
+                const session = getOrCreateSession(req);
+                if (!session && req.headers['mcp-session-id']) {
+                    return res.status(404).json({
                         jsonrpc: '2.0',
-                        error: {
-                            code: -32000,
-                            message: 'Bad Request: No valid session ID provided or invalid initialization',
-                        },
-                        id: req.body?.id || null,
+                        error: { code: -32600, message: 'Session not found' },
+                        id: req.body?.id || null
                     });
-                    return;
                 }
+
+                const { method, params, id } = req.body;
+                console.log(`MCP request: ${method}`, params);
+
+                let result;
                 
-                // Handle the MCP request through the transport
-                await transport.handleRequest(req, res, req.body);
+                if (method === 'initialize') {
+                    // Return server capabilities
+                    result = {
+                        capabilities: {
+                            tools: {}
+                        },
+                        serverInfo: {
+                            name: 'plane-server',
+                            version: '0.1.0'
+                        },
+                        sessionId: session.id
+                    };
+                    
+                    // Send session ID in response header
+                    res.setHeader('Mcp-Session-Id', session.id);
+                    
+                } else if (method === 'tools/list') {
+                    // Get all registered tools
+                    const tools = [];
+                    
+                    // Access the internal tools from the MCP server
+                    if (server.server._requestHandlers && server.server._requestHandlers.get('tools/list')) {
+                        const toolsResponse = await server.server._requestHandlers.get('tools/list')();
+                        result = toolsResponse;
+                    } else {
+                        result = { tools: [] };
+                    }
+                    
+                } else if (method === 'tools/call') {
+                    // Execute a tool
+                    if (server.server._requestHandlers && server.server._requestHandlers.get('tools/call')) {
+                        const toolResponse = await server.server._requestHandlers.get('tools/call')(params);
+                        result = toolResponse;
+                    } else {
+                        throw new Error('Tool execution not available');
+                    }
+                    
+                } else {
+                    return res.status(400).json({
+                        jsonrpc: '2.0',
+                        error: { code: -32601, message: 'Method not found' },
+                        id: id || null
+                    });
+                }
+
+                res.json({
+                    jsonrpc: '2.0',
+                    result,
+                    id: id || null
+                });
+                
             } catch (error) {
                 console.error('Error handling MCP request:', error);
-                if (!res.headersSent) {
-                    res.status(500).json({
-                        jsonrpc: '2.0',
-                        error: {
-                            code: -32603,
-                            message: 'Internal server error',
-                        },
-                        id: req.body?.id || null,
-                    });
-                }
+                res.status(500).json({
+                    jsonrpc: '2.0',
+                    error: {
+                        code: -32603,
+                        message: error.message || 'Internal server error'
+                    },
+                    id: req.body?.id || null
+                });
             }
+        });
+
+        // MCP endpoint - GET (for SSE streaming)
+        app.get('/mcp', async (req, res) => {
+            const sessionId = req.headers['mcp-session-id'];
+            
+            if (!sessionId || !sessions.has(sessionId)) {
+                return res.status(400).send('Session ID required');
+            }
+
+            // Set headers for SSE
+            res.writeHead(200, {
+                'Content-Type': 'text/event-stream',
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive'
+            });
+
+            // Send periodic heartbeat
+            const heartbeat = setInterval(() => {
+                res.write(':heartbeat\n\n');
+            }, 30000);
+
+            // Clean up on client disconnect
+            req.on('close', () => {
+                clearInterval(heartbeat);
+            });
+
+            // Keep connection alive
+            res.write('data: {"type": "connected"}\n\n');
+        });
+
+        // Session deletion endpoint
+        app.delete('/mcp', async (req, res) => {
+            const sessionId = req.headers['mcp-session-id'];
+            
+            if (!sessionId || !sessions.has(sessionId)) {
+                return res.status(404).json({
+                    jsonrpc: '2.0',
+                    error: { code: -32600, message: 'Session not found' }
+                });
+            }
+
+            sessions.delete(sessionId);
+            res.status(204).send();
         });
         
         // Health check endpoint
         app.get('/health', (req, res) => {
             res.json({
-                status: 'ok',
+                status: 'healthy',
                 transport: 'http',
+                sessions: sessions.size,
                 uptime: process.uptime(),
                 timestamp: new Date().toISOString()
             });
         });
         
-        // Tools listing endpoint
+        // Tools listing endpoint (REST API)
         app.get('/tools', async (req, res) => {
             try {
-                // Use the server's tool listing functionality
-                const toolsResponse = await server.server.request({
-                    method: 'tools/list'
-                });
-                
-                res.json({
-                    tools: toolsResponse.tools,
-                    count: toolsResponse.tools.length
-                });
+                if (server.server._requestHandlers && server.server._requestHandlers.get('tools/list')) {
+                    const toolsResponse = await server.server._requestHandlers.get('tools/list')();
+                    res.json({
+                        tools: toolsResponse.tools,
+                        count: toolsResponse.tools.length
+                    });
+                } else {
+                    res.json({ tools: [], count: 0 });
+                }
             } catch (error) {
                 console.error('Error listing tools:', error);
                 res.status(500).json({
@@ -115,358 +207,24 @@ export async function runHTTP(server) {
             }
         });
         
-        // Tool execution endpoint (non-streaming)
-        app.post('/tools/:toolName', async (req, res) => {
-            try {
-                const { toolName } = req.params;
-                const { arguments: toolArgs } = req.body;
-                
-                console.log(`Executing tool: ${toolName} with args:`, toolArgs);
-                
-                const result = await server.server.request({
-                    method: 'tools/call',
-                    params: {
-                        name: toolName,
-                        arguments: toolArgs || {}
-                    }
-                });
-                
-                res.json({
-                    success: true,
-                    result: result.content,
-                    tool: toolName,
-                    timestamp: new Date().toISOString()
-                });
-            } catch (error) {
-                console.error(`Error executing tool ${req.params.toolName}:`, error);
-                res.status(500).json({
-                    success: false,
-                    error: 'Tool execution failed',
-                    message: error.message,
-                    tool: req.params.toolName
-                });
-            }
-        });
-        
-        // Tool execution endpoint (streaming)
-        app.post('/tools/:toolName/stream', async (req, res) => {
-            try {
-                const { toolName } = req.params;
-                const { arguments: toolArgs } = req.body;
-                
-                console.log(`Streaming tool execution: ${toolName} with args:`, toolArgs);
-                
-                // Set up Server-Sent Events headers
-                res.setHeader('Content-Type', 'text/event-stream');
-                res.setHeader('Cache-Control', 'no-cache');
-                res.setHeader('Connection', 'keep-alive');
-                res.setHeader('Access-Control-Allow-Origin', '*');
-                res.setHeader('Access-Control-Allow-Headers', 'Cache-Control');
-                
-                // Send initial connection confirmation
-                res.write(`data: ${JSON.stringify({ type: 'start', tool: toolName, timestamp: new Date().toISOString() })}\\n\\n`);
-                
-                // Execute the tool
-                const result = await server.server.request({
-                    method: 'tools/call',
-                    params: {
-                        name: toolName,
-                        arguments: toolArgs || {}
-                    }
-                });
-                
-                // Stream the result
-                if (result.content && Array.isArray(result.content)) {
-                    // Handle array of content blocks
-                    for (const [index, contentBlock] of result.content.entries()) {
-                        const chunk = {
-                            type: 'content',
-                            index,
-                            data: contentBlock,
-                            timestamp: new Date().toISOString()
-                        };
-                        res.write(`data: ${JSON.stringify(chunk)}\\n\\n`);
-                        
-                        // Add small delay for streaming effect
-                        await new Promise(resolve => setTimeout(resolve, 10));
-                    }
-                } else {
-                    // Handle single content block
-                    const chunk = {
-                        type: 'content',
-                        data: result.content,
-                        timestamp: new Date().toISOString()
-                    };
-                    res.write(`data: ${JSON.stringify(chunk)}\\n\\n`);
-                }
-                
-                // Send completion event
-                const completion = {
-                    type: 'complete',
-                    tool: toolName,
-                    success: true,
-                    timestamp: new Date().toISOString()
-                };
-                res.write(`data: ${JSON.stringify(completion)}\\n\\n`);
-                res.end();
-                
-            } catch (error) {
-                console.error(`Error streaming tool ${req.params.toolName}:`, error);
-                
-                // Send error event
-                const errorEvent = {
-                    type: 'error',
-                    tool: req.params.toolName,
-                    error: error.message,
-                    timestamp: new Date().toISOString()
-                };
-                res.write(`data: ${JSON.stringify(errorEvent)}\\n\\n`);
-                res.end();
-            }
-        });
-        
-        // Batch tool execution endpoint
-        app.post('/tools/batch', async (req, res) => {
-            try {
-                const { tools } = req.body;
-                
-                if (!Array.isArray(tools)) {
-                    return res.status(400).json({
-                        error: 'Invalid request format',
-                        message: 'Expected "tools" array in request body'
-                    });
-                }
-                
-                console.log(`Executing batch of ${tools.length} tools`);
-                
-                const results = [];
-                
-                for (const [index, toolRequest] of tools.entries()) {
-                    try {
-                        const { name, arguments: toolArgs } = toolRequest;
-                        
-                        const result = await server.server.request({
-                            method: 'tools/call',
-                            params: {
-                                name,
-                                arguments: toolArgs || {}
-                            }
-                        });
-                        
-                        results.push({
-                            index,
-                            tool: name,
-                            success: true,
-                            result: result.content,
-                            timestamp: new Date().toISOString()
-                        });
-                    } catch (error) {
-                        results.push({
-                            index,
-                            tool: toolRequest.name,
-                            success: false,
-                            error: error.message,
-                            timestamp: new Date().toISOString()
-                        });
-                    }
-                }
-                
-                res.json({
-                    success: true,
-                    results,
-                    count: results.length,
-                    timestamp: new Date().toISOString()
-                });
-                
-            } catch (error) {
-                console.error('Error executing batch tools:', error);
-                res.status(500).json({
-                    success: false,
-                    error: 'Batch execution failed',
-                    message: error.message
-                });
-            }
-        });
-        
-        // OpenAPI/Swagger documentation endpoint
-        app.get('/docs', (req, res) => {
-            const docs = {
-                openapi: '3.0.0',
-                info: {
-                    title: 'Plane MCP Tools API',
-                    version: '1.0.0',
-                    description: 'HTTP API for Plane project management tools'
-                },
-                servers: [
-                    {
-                        url: `http://localhost:${process.env.PORT || 3094}`,
-                        description: 'Local development server'
-                    }
-                ],
-                paths: {
-                    '/health': {
-                        get: {
-                            summary: 'Health check',
-                            responses: {
-                                '200': {
-                                    description: 'Server status',
-                                    content: {
-                                        'application/json': {
-                                            schema: {
-                                                type: 'object',
-                                                properties: {
-                                                    status: { type: 'string' },
-                                                    transport: { type: 'string' },
-                                                    uptime: { type: 'number' }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    '/tools': {
-                        get: {
-                            summary: 'List available tools',
-                            responses: {
-                                '200': {
-                                    description: 'List of tools',
-                                    content: {
-                                        'application/json': {
-                                            schema: {
-                                                type: 'object',
-                                                properties: {
-                                                    tools: { type: 'array' },
-                                                    count: { type: 'number' }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    '/tools/{toolName}': {
-                        post: {
-                            summary: 'Execute a tool',
-                            parameters: [
-                                {
-                                    name: 'toolName',
-                                    in: 'path',
-                                    required: true,
-                                    schema: { type: 'string' }
-                                }
-                            ],
-                            requestBody: {
-                                content: {
-                                    'application/json': {
-                                        schema: {
-                                            type: 'object',
-                                            properties: {
-                                                arguments: { type: 'object' }
-                                            }
-                                        }
-                                    }
-                                }
-                            },
-                            responses: {
-                                '200': {
-                                    description: 'Tool execution result'
-                                }
-                            }
-                        }
-                    },
-                    '/tools/{toolName}/stream': {
-                        post: {
-                            summary: 'Execute a tool with streaming response',
-                            parameters: [
-                                {
-                                    name: 'toolName',
-                                    in: 'path',
-                                    required: true,
-                                    schema: { type: 'string' }
-                                }
-                            ],
-                            responses: {
-                                '200': {
-                                    description: 'Streaming tool execution result',
-                                    content: {
-                                        'text/event-stream': {
-                                            schema: { type: 'string' }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            };
-            
-            res.json(docs);
-        });
-        
-        // 404 handler
-        app.use('*', (req, res) => {
-            res.status(404).json({
-                error: 'Not found',
-                message: `Endpoint ${req.method} ${req.originalUrl} not found`,
-                availableEndpoints: [
-                    'GET /health',
-                    'GET /tools',
-                    'POST /tools/{toolName}',
-                    'POST /tools/{toolName}/stream',
-                    'POST /tools/batch',
-                    'GET /docs'
-                ]
-            });
-        });
-        
-        // Error handler
-        app.use((error, req, res, next) => {
-            console.error('Unhandled error:', error);
-            res.status(500).json({
-                error: 'Internal server error',
-                message: error.message
-            });
-        });
-        
+        // Start server
         const PORT = process.env.PORT || 3094;
-        const httpServer = app.listen(PORT, '0.0.0.0', () => {
+        const httpServer = app.listen(PORT, () => {
             console.log(`Plane HTTP server is running on port ${PORT}`);
-            console.log(`Available endpoints:`);
-            console.log(`  GET  /health               - Health check`);
-            console.log(`  GET  /tools                - List tools`);
-            console.log(`  POST /tools/{name}         - Execute tool`);
-            console.log(`  POST /tools/{name}/stream  - Execute tool (streaming)`);
-            console.log(`  POST /tools/batch          - Execute multiple tools`);
-            console.log(`  GET  /docs                 - API documentation`);
-            console.log(`Server ready for HTTP requests!`);
+            console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
+            console.log(`Health check: http://localhost:${PORT}/health`);
         });
-        
+
+        // Graceful shutdown
         const cleanup = async () => {
-            console.log('Starting HTTP server cleanup...');
-            
-            if (httpServer) {
-                console.log('Closing HTTP server...');
-                httpServer.close();
-            }
-            
-            if (server.server) {
-                console.log('Closing MCP server...');
-                await server.server.close();
-            }
-            
-            console.log('HTTP server cleanup complete');
+            console.log('Shutting down HTTP server...');
+            httpServer.close();
+            await server.server.close();
             process.exit(0);
         };
-        
+
         process.on('SIGINT', cleanup);
         process.on('SIGTERM', cleanup);
-        process.on('uncaughtException', async (error) => {
-            console.error('Uncaught exception in HTTP server:', error);
-            await cleanup();
-        });
         
     } catch (error) {
         console.error('Failed to start HTTP server:', error);
