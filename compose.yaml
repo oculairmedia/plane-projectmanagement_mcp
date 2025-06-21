@@ -1,0 +1,15 @@
+services:
+  planemcp:
+    image: oculair/planeprojectmanagermcp:latest
+    ports:
+      - "3094:3094"
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PORT=3094
+      - PLANE_API_KEY=${PLANE_API_KEY}
+      - PLANE_BASE_URL=${PLANE_BASE_URL}
+      - PLANE_WORKSPACE_SLUG=${PLANE_WORKSPACE_SLUG}
+      - NODE_ENV=${NODE_ENV:-production}
+networks: {}
