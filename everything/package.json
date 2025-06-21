@@ -1,7 +1,7 @@
 {
-  "name": "ghost-mcp-server",
+  "name": "plane-mcp-server",
   "version": "1.0.0",
-  "description": "MCP server for Ghost blog integration",
+  "description": "MCP server for Plane project management integration",
   "type": "module",
   "scripts": {
     "build": "tsc",
@@ -13,7 +13,7 @@
     "dev:http": "node src/index.js --http"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@modelcontextprotocol/sdk": "1.10.0",
     "axios": "^1.8.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",

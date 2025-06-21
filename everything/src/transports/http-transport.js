@@ -1,6 +1,60 @@
 import express from 'express';
 import cors from 'cors';
 import { randomUUID } from 'crypto';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+
+// Simple in-memory event store for demonstration
+class InMemoryEventStore {
+    constructor() {
+        this.events = new Map();
+    }
+
+    generateEventId(streamId) {
+        return `${streamId}_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+    }
+
+    getStreamIdFromEventId(eventId) {
+        const parts = eventId.split('_');
+        return parts.length > 0 ? parts[0] : '';
+    }
+
+    async storeEvent(streamId, message) {
+        const eventId = this.generateEventId(streamId);
+        this.events.set(eventId, { streamId, message });
+        return eventId;
+    }
+
+    async replayEventsAfter(lastEventId, { send }) {
+        if (!lastEventId || !this.events.has(lastEventId)) {
+            return '';
+        }
+
+        const streamId = this.getStreamIdFromEventId(lastEventId);
+        if (!streamId) {
+            return '';
+        }
+
+        let foundLastEvent = false;
+        const sortedEvents = [...this.events.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+
+        for (const [eventId, { streamId: eventStreamId, message }] of sortedEvents) {
+            if (eventStreamId !== streamId) {
+                continue;
+            }
+
+            if (eventId === lastEventId) {
+                foundLastEvent = true;
+                continue;
+            }
+
+            if (foundLastEvent) {
+                await send(eventId, message);
+            }
+        }
+        return streamId;
+    }
+}
 
 /**
  * Run the server using HTTP streaming transport (MCP compatible)
@@ -10,7 +64,7 @@ import { randomUUID } from 'crypto';
 export async function runHTTP(server) {
     try {
         const app = express();
-        const sessions = new Map(); // Store active sessions
+        const transports = {}; // Store transports by session ID
         
         // Middleware
         app.use(cors({
@@ -27,107 +81,69 @@ export async function runHTTP(server) {
             next();
         });
 
-        // Get or create session
-        const getOrCreateSession = (req) => {
-            const sessionId = req.headers['mcp-session-id'];
-            
-            if (sessionId && sessions.has(sessionId)) {
-                return sessions.get(sessionId);
-            }
-            
-            // Create new session if no ID provided
-            if (!sessionId) {
-                const newSessionId = randomUUID();
-                const session = {
-                    id: newSessionId,
-                    createdAt: new Date(),
-                    lastActivity: new Date()
-                };
-                sessions.set(newSessionId, session);
-                return session;
-            }
-            
-            return null;
-        };
-
         // Main MCP endpoint - POST
         app.post('/mcp', async (req, res) => {
+            console.log('Received MCP request:', req.body);
             try {
-                const session = getOrCreateSession(req);
-                if (!session && req.headers['mcp-session-id']) {
-                    return res.status(404).json({
-                        jsonrpc: '2.0',
-                        error: { code: -32600, message: 'Session not found' },
-                        id: req.body?.id || null
+                // Check for session ID
+                const sessionId = req.headers['mcp-session-id'];
+                let transport;
+
+                if (sessionId && transports[sessionId]) {
+                    // Reuse existing transport
+                    transport = transports[sessionId];
+                } else if (!sessionId && isInitializeRequest(req.body)) {
+                    // New initialization request
+                    const eventStore = new InMemoryEventStore();
+                    transport = new StreamableHTTPServerTransport({
+                        sessionIdGenerator: () => randomUUID(),
+                        eventStore, // Enable resumability  
+                        onsessioninitialized: (sessionId) => {
+                            console.log(`Session initialized with ID: ${sessionId}`);
+                            transports[sessionId] = transport;
+                        }
                     });
-                }
 
-                const { method, params, id } = req.body;
-                console.log(`MCP request: ${method}`, params);
-
-                let result;
-                
-                if (method === 'initialize') {
-                    // Return server capabilities
-                    result = {
-                        capabilities: {
-                            tools: {}
-                        },
-                        serverInfo: {
-                            name: 'plane-server',
-                            version: '0.1.0'
-                        },
-                        sessionId: session.id
+                    // Set onclose handler to clean up transport on closure
+                    transport.onclose = () => {
+                        const sid = transport.sessionId;
+                        if (sid && transports[sid]) {
+                            console.log(`Transport closed for session ${sid}, removing from transports map`);
+                            delete transports[sid];
+                        }
                     };
-                    
-                    // Send session ID in response header
-                    res.setHeader('Mcp-Session-Id', session.id);
-                    
-                } else if (method === 'tools/list') {
-                    // Get all registered tools
-                    const tools = [];
-                    
-                    // Access the internal tools from the MCP server
-                    if (server.server._requestHandlers && server.server._requestHandlers.get('tools/list')) {
-                        const toolsResponse = await server.server._requestHandlers.get('tools/list')();
-                        result = toolsResponse;
-                    } else {
-                        result = { tools: [] };
-                    }
-                    
-                } else if (method === 'tools/call') {
-                    // Execute a tool
-                    if (server.server._requestHandlers && server.server._requestHandlers.get('tools/call')) {
-                        const toolResponse = await server.server._requestHandlers.get('tools/call')(params);
-                        result = toolResponse;
-                    } else {
-                        throw new Error('Tool execution not available');
-                    }
-                    
+
+                    // Connect transport to MCP server before handling the request
+                    await server.server.connect(transport);
+                    await transport.handleRequest(req, res, req.body);
+                    return; // Already handled
                 } else {
-                    return res.status(400).json({
+                    // Invalid request
+                    res.status(400).json({
                         jsonrpc: '2.0',
-                        error: { code: -32601, message: 'Method not found' },
-                        id: id || null
+                        error: {
+                            code: -32000,
+                            message: 'Bad Request: No valid session ID provided',
+                        },
+                        id: null,
                     });
+                    return;
                 }
 
-                res.json({
-                    jsonrpc: '2.0',
-                    result,
-                    id: id || null
-                });
-                
+                // Handle request with existing transport
+                await transport.handleRequest(req, res, req.body);
             } catch (error) {
                 console.error('Error handling MCP request:', error);
-                res.status(500).json({
-                    jsonrpc: '2.0',
-                    error: {
-                        code: -32603,
-                        message: error.message || 'Internal server error'
-                    },
-                    id: req.body?.id || null
-                });
+                if (!res.headersSent) {
+                    res.status(500).json({
+                        jsonrpc: '2.0',
+                        error: {
+                            code: -32603,
+                            message: 'Internal server error',
+                        },
+                        id: null,
+                    });
+                }
             }
         });
 
@@ -135,76 +151,38 @@ export async function runHTTP(server) {
         app.get('/mcp', async (req, res) => {
             const sessionId = req.headers['mcp-session-id'];
             
-            if (!sessionId || !sessions.has(sessionId)) {
+            if (!sessionId || !transports[sessionId]) {
                 return res.status(400).send('Session ID required');
             }
 
-            // Set headers for SSE
-            res.writeHead(200, {
-                'Content-Type': 'text/event-stream',
-                'Cache-Control': 'no-cache',
-                'Connection': 'keep-alive'
-            });
-
-            // Send periodic heartbeat
-            const heartbeat = setInterval(() => {
-                res.write(':heartbeat\n\n');
-            }, 30000);
-
-            // Clean up on client disconnect
-            req.on('close', () => {
-                clearInterval(heartbeat);
-            });
-
-            // Keep connection alive
-            res.write('data: {"type": "connected"}\n\n');
+            const transport = transports[sessionId];
+            await transport.handleRequest(req, res);
         });
 
         // Session deletion endpoint
         app.delete('/mcp', async (req, res) => {
             const sessionId = req.headers['mcp-session-id'];
             
-            if (!sessionId || !sessions.has(sessionId)) {
+            if (!sessionId || !transports[sessionId]) {
                 return res.status(404).json({
                     jsonrpc: '2.0',
                     error: { code: -32600, message: 'Session not found' }
                 });
             }
 
-            sessions.delete(sessionId);
-            res.status(204).send();
+            const transport = transports[sessionId];
+            await transport.handleRequest(req, res);
         });
         
         // Health check endpoint
         app.get('/health', (req, res) => {
             res.json({
                 status: 'healthy',
-                transport: 'http',
-                sessions: sessions.size,
+                transport: 'streamable_http',
+                sessions: Object.keys(transports).length,
                 uptime: process.uptime(),
                 timestamp: new Date().toISOString()
             });
-        });
-        
-        // Tools listing endpoint (REST API)
-        app.get('/tools', async (req, res) => {
-            try {
-                if (server.server._requestHandlers && server.server._requestHandlers.get('tools/list')) {
-                    const toolsResponse = await server.server._requestHandlers.get('tools/list')();
-                    res.json({
-                        tools: toolsResponse.tools,
-                        count: toolsResponse.tools.length
-                    });
-                } else {
-                    res.json({ tools: [], count: 0 });
-                }
-            } catch (error) {
-                console.error('Error listing tools:', error);
-                res.status(500).json({
-                    error: 'Failed to list tools',
-                    message: error.message
-                });
-            }
         });
         
         // Start server
