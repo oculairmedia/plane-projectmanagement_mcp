@@ -250,6 +250,7 @@ export const updatePlaneProjectToolDefinition = {
         },
         required: ['project_id']
     },
+    return_char_limit: 1000000,
     examples: [
         {
             project_id: "7d26d935-6546-46fd-abb7-368635f5b5ef",

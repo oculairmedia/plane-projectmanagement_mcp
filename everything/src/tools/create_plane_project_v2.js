@@ -89,6 +89,7 @@ export const createPlaneProjectToolDefinition = {
         },
         required: ['name', 'identifier'],
     },
+    return_char_limit: 1000000,
 };
 
 export const create_plane_project_v2 = {
