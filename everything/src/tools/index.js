@@ -1,5 +1,5 @@
 import { create_plane_issue } from './create_plane_issue.js';
-import { create_plane_project } from './create_plane_project.js';
+import { create_plane_project_v2 } from './create_plane_project_v2.js';
 import { delete_plane_project } from './delete_plane_project.js';
 import { get_plane_issue_id } from './get_plane_issue_id.js';
 import { list_plane_issues } from './list_plane_issues.js';
@@ -10,7 +10,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema, McpError, ErrorCode } fr
 
 const planeToolDefinitions = [
     create_plane_issue.definition,
-    create_plane_project.definition,
+    create_plane_project_v2.definition,
     delete_plane_project.definition,
     get_plane_issue_id.definition,
     list_plane_issues.definition,
@@ -21,7 +21,7 @@ const planeToolDefinitions = [
 
 const planeToolHandlers = {
     create_plane_issue: create_plane_issue.handler,
-    create_plane_project: create_plane_project.handler,
+    create_plane_project_v2: create_plane_project_v2.handler,
     delete_plane_project: delete_plane_project.handler,
     get_plane_issue_id: get_plane_issue_id.handler,
     list_plane_issues: list_plane_issues.handler,

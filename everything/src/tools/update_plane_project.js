@@ -248,8 +248,7 @@ export const updatePlaneProjectToolDefinition = {
                 // Removed enum: [0, 2] as it causes encoding issues with Letta
             },
         },
-        required: ['project_id'],
-        additionalProperties: false
+        required: ['project_id']
     },
     examples: [
         {
